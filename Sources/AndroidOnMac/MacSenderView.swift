@@ -160,6 +160,11 @@ struct MacSenderView: View {
                         .pickerStyle(.segmented).frame(maxWidth: 340)
                         Spacer(minLength: 0)
                     }
+                    if model.mode == .extended {
+                        Text("手机上文字偏小？选择“流畅优先”使用 1280 × 720 副屏，窗口和文字会更大；手机也可双指缩放画面。")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     HStack(spacing: 28) {
                         Toggle("传输 Mac 音频", isOn: $model.audioEnabled)
                         Toggle("允许手机触控", isOn: $model.inputEnabled)

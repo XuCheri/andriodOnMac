@@ -2,7 +2,7 @@
 
 在 Mac 与 Android 之间双向传输画面：用 Mac 查看、操控 Android；也可以把 Mac 屏幕送到 Android，或将 Android 用作实验性扩展副屏。
 
-**当前为 0.2.0-preview.1 预览版。** Mac 端要求 Apple Silicon、macOS 13+；接收 Mac 画面的 Android App 要求 Android 11+。源码与发行包由 [XuCheri/andriodOnMac](https://github.com/XuCheri/andriodOnMac) 管理。Mac → 手机的 USB 镜像、点击拖动、独立副屏和基本中文输入已获真机确认；新版手机键盘直输、手动旋转、Wi-Fi 与音频仍待专项验收。
+**当前为 0.2.0-preview.1 预览版。** Mac 端要求 Apple Silicon、macOS 13+；接收 Mac 画面的 Android App 要求 Android 11+。源码与发行包由 [XuCheri/andriodOnMac](https://github.com/XuCheri/andriodOnMac) 管理。Mac → 手机的 USB 镜像、点击拖动、独立副屏和基本中文输入已获真机确认；Wi-Fi 拔掉 USB 后的画面与触控也已确认。新版手机键盘直输、横屏全屏与缩放、音频仍待专项验收。
 
 | 使用方向 | 连接方式 | 手机需要安装 App 吗 |
 | --- | --- | --- |
@@ -22,7 +22,7 @@ Mac → 手机的触控需要 Mac 辅助功能权限；未授权仍可观看。M
 ## 能力与边界
 
 - Mac → 手机采用原生 ScreenCaptureKit、硬件 H.264 编码和 Android 原生解码；可选 AAC 系统声音、触控与快捷键。接收端提供手机键盘直接输入，中文在输入法确认组词后进入 Mac；新输入方式仍待真机验收。
-- 手机常驻“键盘”、横／竖屏切换与“更多”按钮；快捷键、全屏、声音及停止共享集中在“更多”。手动旋转的真机验收尚未完成。
+- 竖屏保留“键盘”、“横屏”和“更多”；横屏自动全屏，仅保留小菜单入口。双指捏合放大文字，放大后双指平移，单指始终操作 Mac。全屏与缩放的真机验收尚未完成。
 - 扩展副屏是独立桌面，可以拖入窗口；依赖未公开的 macOS 虚拟显示接口，兼容性可能随系统更新变化。失败时可改用镜像屏幕。
 - Mac → 手机连接使用 TLS、固定证书指纹和设备配对；新设备必须由 Mac 确认。仅处理用户主动开始的会话。
 - 接收端进入后台、锁屏或停止时结束共享；Mac 锁定或睡眠也停止共享。短暂断线只进行有限重连，不提供无人值守访问。
