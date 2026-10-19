@@ -59,8 +59,15 @@ public struct WirelessEndpoint: Equatable, Sendable {
             return String(parts[0]).withCString { inet_pton(AF_INET6, $0, &bytes) } == 1
         }
         if host.utf8.allSatisfy({ (48...57).contains($0) || $0 == 46 }) {
-            var bytes = in_addr()
-            return host.withCString { inet_pton(AF_INET, $0, &bytes) } == 1
+            // inet_pton accepts leading zeroes on some Darwin releases. Keep
+            // addresses unambiguous and validation consistent across macOS.
+            let octets = host.split(separator: ".", omittingEmptySubsequences: false)
+            return octets.count == 4 && octets.allSatisfy { octet in
+                guard !octet.isEmpty, octet.count <= 3,
+                      octet.count == 1 || octet.first != "0",
+                      let number = Int(octet) else { return false }
+                return number <= 255
+            }
         }
         let hostname = host.hasSuffix(".") ? String(host.dropLast()) : host
         return hostname.split(separator: ".", omittingEmptySubsequences: false).allSatisfy { label in

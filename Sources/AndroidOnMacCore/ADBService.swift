@@ -117,16 +117,37 @@ public actor ADBService {
             return
         }
         try Task.checkCancellation()
-        server = try processes.launch(executable: paths.adb,
-            arguments: ["-L", "tcp:127.0.0.1:5037", "server", "nodaemon"],
+        let launched = try processes.launch(executable: paths.adb,
+            // ADB's server listener accepts tcp:PORT, not tcp:HOST:PORT.
+            // Without -a the listener is restricted to loopback.
+            arguments: ["-L", "tcp:5037", "server", "nodaemon"],
             environment: paths.environment, completion: { _ in })
-        for _ in 0..<30 {
-            try await Task.sleep(nanoseconds: 100_000_000)
-            if let version = try ADBServerProbe.version() {
-                guard version == 41 else { throw ADBFailure.incompatibleServer(version) }
-                return
+        server = launched
+        var becameReady = false
+        defer {
+            // Only this launch belongs to us. Never stop a server found by the
+            // initial probe, including when it is incompatible or unresponsive.
+            if !becameReady {
+                launched.stop()
+                if server === launched { server = nil }
             }
-            if server?.isRunning == false { break }
+        }
+        let deadline = ProcessInfo.processInfo.systemUptime + 8
+        while ProcessInfo.processInfo.systemUptime < deadline {
+            try await Task.sleep(nanoseconds: 100_000_000)
+            do {
+                if let version = try ADBServerProbe.version() {
+                    guard version == 41 else { throw ADBFailure.incompatibleServer(version) }
+                    becameReady = true
+                    return
+                }
+            } catch ADBFailure.occupiedPort {
+                // adb opens its listener before USB/mDNS initialization ends.
+                // A short host:version timeout during our own launch is not an
+                // unrelated port owner; retry within this bounded startup wait.
+                if !launched.isRunning { break }
+            }
+            if !launched.isRunning { break }
         }
         throw ADBFailure.failed("ADB 服务未能启动，请查看是否有其他 Android 工具占用连接。")
     }

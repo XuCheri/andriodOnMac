@@ -1,50 +1,58 @@
-import XCTest
+import Foundation
+import Testing
 @testable import AndroidOnMacCore
 
-final class ProcessSupervisorTests: XCTestCase {
+@Suite(.serialized)
+struct ProcessSupervisorTests {
+    @Test
     func testCapturesBothStreamsAndExitStatus() async throws {
         let runner = ProcessSupervisor()
         let result = try await runner.run(executable: URL(fileURLWithPath: "/bin/sh"),
             arguments: ["-c", "printf output; printf error >&2; exit 7"])
-        XCTAssertEqual(result.exitCode, 7)
-        XCTAssertEqual(result.stdout, "output")
-        XCTAssertEqual(result.stderr, "error")
-        XCTAssertEqual(runner.activeCount, 0)
+        #expect(result.exitCode == 7)
+        #expect(result.stdout == "output")
+        #expect(result.stderr == "error")
+        #expect(runner.activeCount == 0)
     }
 
+    @Test
     func testInputDeliveredThroughStdin() async throws {
         let result = try await ProcessSupervisor().run(executable: URL(fileURLWithPath: "/bin/cat"),
             arguments: [], input: "test input\n")
-        XCTAssertEqual(result.stdout, "test input\n")
+        #expect(result.stdout == "test input\n")
     }
 
+    @Test
     func testArgumentsRemainLiteral() async throws {
         let literal = "$(touch never-created); `echo nope` & spaced value"
         let result = try await ProcessSupervisor().run(executable: URL(fileURLWithPath: "/usr/bin/printf"),
             arguments: ["%s", literal])
-        XCTAssertEqual(result.stdout, literal)
+        #expect(result.stdout == literal)
     }
 
+    @Test
     func testTimeoutReapsOwnedProcess() async throws {
         let runner = ProcessSupervisor()
         do {
             _ = try await runner.run(executable: URL(fileURLWithPath: "/bin/sleep"), arguments: ["10"], timeout: 0.1)
-            XCTFail("Expected timeout")
+            Issue.record("Expected timeout")
         } catch ProcessFailure.timedOut { }
-        XCTAssertEqual(runner.activeCount, 0)
+        #expect(runner.activeCount == 0)
     }
 
+    @Test
     func testTaskCancellationReapsOwnedProcess() async throws {
         let runner = ProcessSupervisor()
         let task = Task { try await runner.run(executable: URL(fileURLWithPath: "/bin/sleep"), arguments: ["10"]) }
         try await Task.sleep(nanoseconds: 100_000_000)
         task.cancel()
-        do { _ = try await task.value; XCTFail("Expected cancellation") }
+        do { _ = try await task.value; Issue.record("Expected cancellation") }
         catch ProcessFailure.cancelled { }
         catch is CancellationError { }
-        XCTAssertEqual(runner.activeCount, 0)
+        #expect(runner.activeCount == 0)
     }
 
+    @Test
     func testTerminateAllDoesNotStopUnownedProcess() async throws {
         let other = Process()
         other.executableURL = URL(fileURLWithPath: "/bin/sleep")
@@ -55,30 +63,45 @@ final class ProcessSupervisorTests: XCTestCase {
         let task = Task { try await runner.run(executable: URL(fileURLWithPath: "/bin/sleep"), arguments: ["10"]) }
         try await Task.sleep(nanoseconds: 100_000_000)
         runner.terminateAll()
-        do { _ = try await task.value; XCTFail("Expected cancellation") } catch ProcessFailure.cancelled { }
-        XCTAssertTrue(other.isRunning)
-        XCTAssertEqual(runner.activeCount, 0)
+        do { _ = try await task.value; Issue.record("Expected cancellation") } catch ProcessFailure.cancelled { }
+        #expect(other.isRunning)
+        #expect(runner.activeCount == 0)
     }
 
+    @Test
     func testMissingExecutableLeavesNoTrackedChild() async {
         let runner = ProcessSupervisor()
         do {
             _ = try await runner.run(executable: URL(fileURLWithPath: "/nonexistent/androidonmac-test"), arguments: [])
-            XCTFail("Expected launch failure")
+            Issue.record("Expected launch failure")
         } catch { }
-        XCTAssertEqual(runner.activeCount, 0)
+        #expect(runner.activeCount == 0)
     }
 
+    @Test
     func testOutputRetentionIsBounded() async throws {
         let result = try await ProcessSupervisor().run(executable: URL(fileURLWithPath: "/usr/bin/awk"),
             arguments: ["BEGIN { for (i = 0; i < 200000; i++) printf \"a\" }"])
-        XCTAssertEqual(result.exitCode, 0)
-        XCTAssertEqual(result.stdout.utf8.count, 128 * 1024)
+        #expect(result.exitCode == 0)
+        #expect(result.stdout.utf8.count == 128 * 1024)
     }
 
+    @Test
     func testEngineUsesTheProbedLocalServer() {
         let paths = EnginePaths(directory: URL(fileURLWithPath: "/test/engine"))
-        XCTAssertEqual(paths.environment["ADB_SERVER_SOCKET"], "tcp:127.0.0.1:5037")
-        XCTAssertEqual(paths.environment["ANDROID_ADB_SERVER_PORT"], "5037")
+        #expect(paths.environment["ADB_SERVER_SOCKET"] == "tcp:127.0.0.1:5037")
+        #expect(paths.environment["ANDROID_ADB_SERVER_PORT"] == "5037")
+    }
+
+    @Test
+    func testShutdownRejectsWorkThatResumesLater() async {
+        let runner = ProcessSupervisor()
+        runner.shutdown()
+        do {
+            _ = try await runner.run(executable: URL(fileURLWithPath: "/bin/echo"), arguments: ["late work"])
+            Issue.record("Closed supervisor must reject new work")
+        } catch ProcessFailure.cancelled { }
+        catch { Issue.record("Unexpected error: \(error)") }
+        #expect(runner.activeCount == 0)
     }
 }

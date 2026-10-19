@@ -1,7 +1,9 @@
-import XCTest
+import Foundation
+import Testing
 @testable import AndroidOnMacCore
 
-final class DeviceParserTests: XCTestCase {
+@Suite
+struct DeviceParserTests {
     // Representative adb devices -l output, including Android's TLS mDNS serial.
     private let devicesFixture = """
     * daemon not running; starting now at tcp:5037
@@ -15,43 +17,48 @@ final class DeviceParserTests: XCTestCase {
     recovery-phone\trecovery usb:1-1 model:Recovery_Device
     """
 
-    func testDevicesPreservesStatesAndSelectsTransport() {
+    @Test
+    func testDevicesPreservesStatesAndSelectsTransport() throws {
         let devices = ADBParser.devices(devicesFixture)
-        XCTAssertEqual(devices.count, 6)
-        XCTAssertEqual(devices[0].transport, .usb)
-        XCTAssertEqual(devices[0].model, "SM_G973U1")
-        XCTAssertEqual(devices[1].transport, .wifi)
-        XCTAssertEqual(devices[1].displayName, "Pixel 7")
-        XCTAssertEqual(devices[2].transport, .wifi)
-        XCTAssertEqual(devices[3].state, .unauthorized)
-        XCTAssertFalse(devices[3].isReady)
-        XCTAssertEqual(devices[4].state, .offline)
-        XCTAssertEqual(devices[4].transport, .wifi)
-        XCTAssertEqual(devices[5].state, .unknown("recovery"))
-        XCTAssertEqual(devices.map(\.id), devices.map(\.serial))
+        try #require(devices.count == 6)
+        #expect(devices[0].transport == .usb)
+        #expect(devices[0].model == "SM_G973U1")
+        #expect(devices[1].transport == .wifi)
+        #expect(devices[1].displayName == "Pixel 7")
+        #expect(devices[2].transport == .wifi)
+        #expect(devices[3].state == .unauthorized)
+        #expect(!(devices[3].isReady))
+        #expect(devices[4].state == .offline)
+        #expect(devices[4].transport == .wifi)
+        #expect(devices[5].state == .unknown("recovery"))
+        #expect(devices.map(\.id) == devices.map(\.serial))
     }
 
-    func testMissingModelsAndNoPermissionState() {
+    @Test
+    func testMissingModelsAndNoPermissionState() throws {
         let devices = ADBParser.devices("phone\tno permissions (missing udev rules)\nother\tdevice\n")
-        XCTAssertEqual(devices.first?.state, .unknown("no permissions"))
-        XCTAssertEqual(devices.last?.displayName, "other")
-        XCTAssertTrue(devices.last!.isReady)
+        #expect(devices.first?.state == .unknown("no permissions"))
+        #expect(devices.last?.displayName == "other")
+        let last = try #require(devices.last)
+        #expect(last.isReady)
     }
 
+    @Test
     func testIgnoresDiagnosticsHeadersDuplicatesAndMalformedLines() {
         let output = "List of devices attached\r\n\r\n" +
             "adb: error: more than one device/emulator\n" +
             "error: cannot connect\nrandom diagnostic text\n" +
             "phone device model:Pixel_7\nphone\tdevice model:duplicate\n" +
             "--option\tdevice\nsingle-field\n"
-        XCTAssertEqual(ADBParser.devices(output).map(\.serial), ["phone"])
-        XCTAssertEqual(ADBParser.devices("").count, 0)
+        #expect(ADBParser.devices(output).map(\.serial) == ["phone"])
+        #expect(ADBParser.devices("").count == 0)
     }
 
+    @Test
     func testUnknownStateIsRetainedButCannotMirror() {
         let devices = ADBParser.devices("phone\tfuture-state model:Future_Phone")
-        XCTAssertEqual(devices.first?.state, .unknown("future-state"))
-        XCTAssertEqual(devices.first?.isReady, false)
+        #expect(devices.first?.state == .unknown("future-state"))
+        #expect(devices.first?.isReady == false)
     }
 
     // Mirrors adb's documented three-column output; the two ports are distinct.
@@ -64,27 +71,30 @@ final class DeviceParserTests: XCTestCase {
     studio-qr                _adb-tls-pairing._tcp  android.local:55861
     """
 
-    func testMDNSSeparatesPairingAndConnectPorts() {
+    @Test
+    func testMDNSSeparatesPairingAndConnectPorts() throws {
         let services = ADBParser.mdns(mdnsFixture)
-        XCTAssertEqual(services.count, 4)
-        XCTAssertEqual(services[0].kind, .pairing)
-        XCTAssertEqual(services[0].port, 33861)
-        XCTAssertEqual(services[1].kind, .connect)
-        XCTAssertEqual(services[1].port, 33015)
-        XCTAssertEqual(services[2].host, "fe80::42%en0")
-        XCTAssertEqual(services[3].host, "android.local")
+        try #require(services.count == 4)
+        #expect(services[0].kind == .pairing)
+        #expect(services[0].port == 33861)
+        #expect(services[1].kind == .connect)
+        #expect(services[1].port == 33015)
+        #expect(services[2].host == "fe80::42%en0")
+        #expect(services[3].host == "android.local")
     }
 
-    func testMDNSRefreshesChangedPortWithoutChangingIdentity() {
-        let first = ADBParser.mdns("phone _adb-tls-connect._tcp 192.168.1.2:37001")[0]
+    @Test
+    func testMDNSRefreshesChangedPortWithoutChangingIdentity() throws {
+        let first = try #require(ADBParser.mdns("phone _adb-tls-connect._tcp 192.168.1.2:37001").first)
         let refreshed = ADBParser.mdns("phone _adb-tls-connect._tcp 192.168.1.2:37001\nphone _adb-tls-connect._tcp 192.168.1.2:37002")
-        XCTAssertEqual(refreshed.count, 1)
-        XCTAssertEqual(refreshed[0].id, first.id)
-        XCTAssertEqual(refreshed[0].port, 37002)
+        try #require(refreshed.count == 1)
+        #expect(refreshed[0].id == first.id)
+        #expect(refreshed[0].port == 37002)
         let paired = MDNSService(name: "phone", host: first.host, port: 40001, kind: .pairing)
-        XCTAssertNotEqual(paired.id, first.id)
+        #expect(paired.id != first.id)
     }
 
+    @Test
     func testMDNSRejectsInvalidEndpointAndDiagnosticLines() {
         let output = """
         adb: failed to discover services
@@ -93,6 +103,6 @@ final class DeviceParserTests: XCTestCase {
         invalid3 _adb-tls-pairing._tcp host;command:1234
         incomplete _adb-tls-connect._tcp
         """
-        XCTAssertEqual(ADBParser.mdns(output), [])
+        #expect(ADBParser.mdns(output) == [])
     }
 }
