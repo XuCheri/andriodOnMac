@@ -195,6 +195,41 @@ public actor ADBService {
         _ = try await execute(["-s", serial, "shell", "input", "keyevent", String(code)])
     }
 
+    public func installReceiver(serial: String, apk: URL) async throws {
+        guard FileManager.default.fileExists(atPath: apk.path) else {
+            throw ADBFailure.failed("安装包内缺少 Android 接收端，请下载完整的 0.2.0 预览版。")
+        }
+        let result = try await execute(["-s", serial, "install", "-r", apk.path], timeout: 120)
+        guard result.stdout.contains("Success") else { throw ADBFailure.failed("手机未完成安装，请查看手机上的安装确认。") }
+    }
+
+    public func addReverse(serial: String, devicePort: UInt16, hostPort: UInt16) async throws {
+        _ = try await execute(["-s", serial, "reverse", "--no-rebind", "tcp:\(devicePort)", "tcp:\(hostPort)"])
+    }
+
+    public func removeReverse(serial: String, devicePort: UInt16, hostPort: UInt16) async {
+        // Verify ownership still matches before removing the specific mapping.
+        guard let list = try? await execute(["-s", serial, "reverse", "--list"]),
+              list.stdout.split(separator: "\n").contains(where: { line in
+                  let parts = line.split(whereSeparator: \.isWhitespace)
+                  return parts.count >= 3 && parts[parts.count - 2] == "tcp:\(devicePort)"
+                      && parts[parts.count - 1] == "tcp:\(hostPort)"
+              }) else { return }
+        _ = try? await execute(["-s", serial, "reverse", "--remove", "tcp:\(devicePort)"])
+    }
+
+    public func openReceiver(serial: String, bootstrap: Data) async throws {
+        // adb shell joins arguments into a remote shell command. URL-safe base64
+        // avoids shell syntax entirely, and neither this payload nor command output is logged.
+        let value = bootstrap.base64EncodedString().replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+        let result = try await execute(["-s", serial, "shell", "am", "start", "-n",
+            "chat.xucheri.androidonmac.receiver/.MainActivity", "--es", "connection", "aom:" + value])
+        guard !result.combined.contains("Error"), !result.combined.contains("Exception") else {
+            throw ADBFailure.failed("无法打开接收端，请先点击“安装 Android 接收端”。")
+        }
+    }
+
     public static func friendlyError(_ output: String) -> String {
         let text = output.lowercased()
         if text.contains("unauthorized") { return "手机尚未授权。请解锁手机并允许这台 Mac 的 USB 调试。" }
