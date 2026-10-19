@@ -57,6 +57,9 @@ public final class DisplayServer: @unchecked Sendable {
     private var startAttempted = false
     private var startID: UUID?
     private var startContinuation: CheckedContinuation<(port: UInt16, token: String), Error>?
+    private var startTrustTask: Task<Void, Never>?
+    private var saveTrustTask: Task<Void, Never>?
+    private let securityTimeout: TimeInterval
     private var event: (DisplayServerEvent, UInt64) -> Void = { _, _ in }
     private let readTrust: () throws -> Data?
     private let saveTrust: (Data) throws -> Void
@@ -66,13 +69,14 @@ public final class DisplayServer: @unchecked Sendable {
     public var connectionGeneration: UInt64 { connectionState.generation }
 
     public init() {
+        securityTimeout = 45
         readTrust = { try SecureStore.read("trusted-receivers") }
         saveTrust = { try SecureStore.write($0, account: "trusted-receivers") }
     }
 
     // Tests supply an isolated store; production always uses the Keychain.
-    init(readTrust: @escaping () throws -> Data?, saveTrust: @escaping (Data) throws -> Void) {
-        self.readTrust = readTrust; self.saveTrust = saveTrust
+    init(readTrust: @escaping () throws -> Data?, saveTrust: @escaping (Data) throws -> Void, securityTimeout: TimeInterval = 45) {
+        self.readTrust = readTrust; self.saveTrust = saveTrust; self.securityTimeout = securityTimeout
     }
 
     public func start(identity: TransportIdentity, lan: Bool,
@@ -91,48 +95,28 @@ public final class DisplayServer: @unchecked Sendable {
                     guard !self.connectionState.isStopped, !cancellation.isStopped else {
                         self.stopOnQueue(); return
                     }
-                    do {
-                        self.event = onEvent
-                        if let data = try self.readTrust() {
-                            self.trusted = try JSONDecoder().decode([TrustedReceiver].self, from: data)
-                        }
-                        guard !self.connectionState.isStopped, !cancellation.isStopped else { throw CancellationError() }
-                        let tls = NWProtocolTLS.Options()
-                        guard let secIdentity = sec_identity_create(identity.identity) else { throw TransportFailure.message("TLS 身份不可用。") }
-                        sec_protocol_options_set_local_identity(tls.securityProtocolOptions, secIdentity)
-                        sec_protocol_options_set_min_tls_protocol_version(tls.securityProtocolOptions, .TLSv12)
-                        let tcp = NWProtocolTCP.Options(); tcp.noDelay = true
-                        let parameters = NWParameters(tls: tls, tcp: tcp)
-                        parameters.includePeerToPeer = false
-                        if !lan { parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any) }
-                        let listener = try NWListener(using: parameters, on: .any)
-                        self.listener = listener
-                        if lan {
-                            listener.service = NWListener.Service(
-                                name: "AndroidOnMac · " + (Host.current().localizedName ?? "Mac"),
-                                type: "_aom-display._tcp", txtRecord: Self.discoveryRecord(fingerprint: identity.fingerprint))
-                        }
-                        listener.stateUpdateHandler = { [weak self, weak listener] state in
-                            guard let self, let listener, self.listener === listener else { return }
-                            switch state {
-                            case .ready:
-                                guard self.startContinuation != nil, let port = listener.port else { return }
-                                guard !self.connectionState.isStopped else { self.stopOnQueue(); return }
-                                self.running = true
-                                self.bootstrapDeadline = ProcessInfo.processInfo.systemUptime + 300
-                                self.startTimer()
-                                self.finishStart(.success((port.rawValue, self.bootstrapToken)))
-                            case .failed(let error):
-                                let wasRunning = self.running
-                                self.finishStart(.failure(error)); self.stopOnQueue()
-                                if wasRunning { self.emit(.failure("接收服务已停止，请检查本地网络权限。")) }
-                            case .cancelled: self.stopOnQueue()
-                            default: break
+                    self.event = onEvent
+                    let readTrust = self.readTrust, timeout = self.securityTimeout
+                    self.startTrustTask = Task { [weak self] in
+                        let result: Result<[TrustedReceiver], Error>
+                        do {
+                            let receivers = try await TransportSecurityWork.run(timeout: timeout) { checkActive in
+                                let data = try readTrust()
+                                try checkActive()
+                                return try data.map { try JSONDecoder().decode([TrustedReceiver].self, from: $0) } ?? []
                             }
+                            result = .success(receivers)
+                        } catch { result = .failure(error) }
+                        self?.queue.async { [weak self] in
+                            guard let self, self.startID == attempt, self.startContinuation != nil,
+                                  !self.connectionState.isStopped, !cancellation.isStopped else { return }
+                            self.startTrustTask = nil
+                            do {
+                                self.trusted = try result.get()
+                                try self.startListener(identity: identity, lan: lan)
+                            } catch { self.finishStart(.failure(error)); self.stopOnQueue() }
                         }
-                        listener.newConnectionHandler = { [weak self] connection in self?.accept(connection) }
-                        listener.start(queue: self.queue)
-                    } catch { self.finishStart(.failure(error)); self.stopOnQueue() }
+                    }
                 }
             }
         } onCancel: {
@@ -142,6 +126,44 @@ public final class DisplayServer: @unchecked Sendable {
                 if self.startID == attempt { self.stopOnQueue() }
             }
         }
+    }
+
+    private func startListener(identity: TransportIdentity, lan: Bool) throws {
+        let tls = NWProtocolTLS.Options()
+        guard let secIdentity = sec_identity_create(identity.identity) else { throw TransportFailure.message("TLS 身份不可用。") }
+        sec_protocol_options_set_local_identity(tls.securityProtocolOptions, secIdentity)
+        sec_protocol_options_set_min_tls_protocol_version(tls.securityProtocolOptions, .TLSv12)
+        let tcp = NWProtocolTCP.Options(); tcp.noDelay = true
+        let parameters = NWParameters(tls: tls, tcp: tcp)
+        parameters.includePeerToPeer = false
+        if !lan { parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any) }
+        let listener = try NWListener(using: parameters, on: .any)
+        self.listener = listener
+        if lan {
+            listener.service = NWListener.Service(
+                name: "AndroidOnMac · " + (Host.current().localizedName ?? "Mac"),
+                type: "_aom-display._tcp", txtRecord: Self.discoveryRecord(fingerprint: identity.fingerprint))
+        }
+        listener.stateUpdateHandler = { [weak self, weak listener] state in
+            guard let self, let listener, self.listener === listener else { return }
+            switch state {
+            case .ready:
+                guard self.startContinuation != nil, let port = listener.port else { return }
+                guard !self.connectionState.isStopped else { self.stopOnQueue(); return }
+                self.running = true
+                self.bootstrapDeadline = ProcessInfo.processInfo.systemUptime + 300
+                self.startTimer()
+                self.finishStart(.success((port.rawValue, self.bootstrapToken)))
+            case .failed(let error):
+                let wasRunning = self.running
+                self.finishStart(.failure(error)); self.stopOnQueue()
+                if wasRunning { self.emit(.failure("接收服务已停止，请检查本地网络权限。")) }
+            case .cancelled: self.stopOnQueue()
+            default: break
+            }
+        }
+        listener.newConnectionHandler = { [weak self] connection in self?.accept(connection) }
+        listener.start(queue: self.queue)
     }
 
     private func finishStart(_ result: Result<(port: UInt16, token: String), Error>) {
@@ -162,15 +184,38 @@ public final class DisplayServer: @unchecked Sendable {
     public func approve(_ id: UUID) {
         queue.async {
             guard self.running, !self.connectionState.isStopped, let peer = self.pendingPair, peer.id == id, let hello = peer.hello,
-                  let deviceID = hello["deviceID"] as? String else { return }
+                  self.saveTrustTask == nil, let deviceID = hello["deviceID"] as? String else { return }
             do {
                 let receiver = TrustedReceiver(id: deviceID, name: String((hello["deviceName"] as? String ?? "Android").prefix(80)), token: randomSecret())
-                var updated = self.trusted.filter { $0.id != deviceID }; updated.append(receiver)
-                try self.saveTrust(JSONEncoder().encode(updated))
-                self.trusted = updated // Commit trust only after durable storage succeeds.
-                self.bootstrapToken = randomSecret() // the visible QR has now been consumed
-                self.pendingPair = nil
-                self.authenticateControl(peer, receiver: receiver)
+                let updated = self.trusted.filter { $0.id != deviceID } + [receiver]
+                let data = try JSONEncoder().encode(updated), epoch = self.connectionGeneration
+                let peerID = peer.id
+                let saveTrust = self.saveTrust, timeout = self.securityTimeout
+                self.saveTrustTask = Task { [weak self] in
+                    let result: Result<Void, Error>
+                    do {
+                        try await TransportSecurityWork.run(timeout: timeout) { checkActive in
+                            try checkActive(); try saveTrust(data)
+                        }
+                        result = .success(())
+                    } catch { result = .failure(error) }
+                    self?.queue.async { [weak self] in
+                        guard let self, let peer = self.peers[peerID], self.running, !self.connectionState.isStopped,
+                              self.connectionGeneration == epoch, self.pendingPair === peer,
+                              self.peers[peer.id] === peer, !peer.closing else { return }
+                        self.saveTrustTask = nil
+                        do {
+                            try result.get()
+                            self.trusted = updated // Commit only after storage and current-attempt checks succeed.
+                            self.bootstrapToken = randomSecret()
+                            self.pendingPair = nil
+                            self.authenticateControl(peer, receiver: receiver)
+                        } catch {
+                            self.rejectOnQueue(peer, "无法保存手机身份，请在 Mac 完成或取消系统钥匙串授权后重试。")
+                            self.emit(.failure(error.localizedDescription))
+                        }
+                    }
+                }
             } catch {
                 self.rejectOnQueue(peer, "无法保存手机身份，请检查 Mac 钥匙串。")
                 self.emit(.failure("无法保存手机身份，请检查 Mac 钥匙串。"))
@@ -181,6 +226,7 @@ public final class DisplayServer: @unchecked Sendable {
     public func reject(_ id: UUID) {
         queue.async {
             guard let peer = self.pendingPair, peer.id == id else { return }
+            self.saveTrustTask?.cancel(); self.saveTrustTask = nil
             self.pendingPair = nil; self.rejectOnQueue(peer, "Mac 拒绝了本次配对。")
         }
     }
@@ -383,7 +429,10 @@ public final class DisplayServer: @unchecked Sendable {
     private func remove(_ peer: Peer) {
         guard peers.removeValue(forKey: peer.id) != nil else { return }
         peer.connection.stateUpdateHandler = nil; peer.connection.cancel()
-        if pendingPair === peer { pendingPair = nil; emit(.pairingCancelled(peer.id)) }
+        if pendingPair === peer {
+            saveTrustTask?.cancel(); saveTrustTask = nil
+            pendingPair = nil; emit(.pairingCancelled(peer.id))
+        }
         let wasActive = control === peer || media === peer
         if wasActive {
             let others = [control, media].compactMap { $0 }.filter { $0 !== peer }
@@ -411,6 +460,8 @@ public final class DisplayServer: @unchecked Sendable {
 
     private func stopOnQueue() {
         connectionState.stop()
+        startTrustTask?.cancel(); startTrustTask = nil
+        saveTrustTask?.cancel(); saveTrustTask = nil
         finishStart(.failure(CancellationError()))
         running = false; timer?.cancel(); timer = nil
         let stoppingControl = control

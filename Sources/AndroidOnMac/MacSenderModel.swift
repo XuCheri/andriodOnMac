@@ -212,7 +212,7 @@ final class MacSenderModel: ObservableObject {
         activeDisplayID = mode == .mirror ? selectedDisplayID : nil
         startedAt = ProcessInfo.processInfo.systemUptime; status = "正在准备加密连接…"
         armTimeout(seconds: 60, generation: generation,
-                   message: "准备连接超时，请检查本地网络权限及网络状态后重试。")
+                   message: "准备连接超时，请先完成或取消系统钥匙串授权，并检查本地网络权限后重试。")
         setupTask = Task { [weak self] in
             guard let self else { return }
             do {

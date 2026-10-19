@@ -39,10 +39,17 @@ public struct TransportIdentity: @unchecked Sendable {
     public let fingerprint: String
 
     public static func load(processes: ProcessSupervisor) async throws -> Self {
-        if let data = try SecureStore.read("tls-pkcs12"), let pass = try SecureStore.read("tls-password"),
-           let password = String(data: pass, encoding: .utf8) {
-            return try importIdentity(data, password: password)
-        }
+        try await load(processes: processes, read: SecureStore.read,
+                       write: { try SecureStore.write($0, account: $1) })
+    }
+
+    // Dependency injection keeps cancellation tests entirely outside the real Keychain.
+    static func load(processes: ProcessSupervisor, read: @escaping (String) throws -> Data?,
+                     write: @escaping (Data, String) throws -> Void, securityTimeout: TimeInterval = 45) async throws -> Self {
+        if let stored = try await TransportSecurityWork.run(timeout: securityTimeout, { checkActive in
+            try readStoredIdentity(read: read, checkActive: checkActive)
+        }) { return stored }
+        try Task.checkCancellation()
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("aom-tls-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: false,
             attributes: [.posixPermissions: 0o700])
@@ -58,14 +65,40 @@ public struct TransportIdentity: @unchecked Sendable {
             arguments: ["req", "-x509", "-newkey", "rsa:2048", "-sha256", "-days", "3650", "-nodes",
                         "-subj", "/CN=AndroidOnMac", "-keyout", key.path, "-out", cert.path], timeout: 30)
         guard result.exitCode == 0 else { throw TransportFailure.message("创建本机加密身份失败。") }
+        try Task.checkCancellation()
         let exported = try await processes.run(executable: URL(fileURLWithPath: "/usr/bin/openssl"),
             arguments: ["pkcs12", "-export", "-inkey", key.path, "-in", cert.path, "-out", p12.path,
                         "-passout", "file:" + pass.path], timeout: 15)
         guard exported.exitCode == 0 else { throw TransportFailure.message("导出本机加密身份失败。") }
+        try Task.checkCancellation()
         let data = try Data(contentsOf: p12)
+        return try await TransportSecurityWork.run(timeout: securityTimeout) { checkActive in
+            // Another session may have completed first while OpenSSL ran. Never
+            // replace that identity, or turn partial/denied reads into creation.
+            if let stored = try readStoredIdentity(read: read, checkActive: checkActive) { return stored }
+            try checkActive()
+            let identity = try importIdentity(data, password: password)
+            try checkActive()
+            // Once the first write has entered the system, complete this initial
+            // pair together. Cancelling the waiter cannot roll back SecItem calls.
+            try write(Data(password.utf8), "tls-password")
+            try write(data, "tls-pkcs12")
+            return identity
+        }
+    }
+
+    private static func readStoredIdentity(read: (String) throws -> Data?, checkActive: () throws -> Void) throws -> Self? {
+        try checkActive()
+        let data = try read("tls-pkcs12")
+        try checkActive()
+        let pass = try read("tls-password")
+        try checkActive()
+        if data == nil && pass == nil { return nil }
+        guard let data, let pass, let password = String(data: pass, encoding: .utf8), !password.isEmpty else {
+            throw TransportFailure.message("钥匙串中的原有连接身份不完整，已保留现有记录，未创建替代身份。请检查钥匙串授权或恢复原有身份。")
+        }
         let identity = try importIdentity(data, password: password)
-        try SecureStore.write(Data(password.utf8), account: "tls-password")
-        try SecureStore.write(data, account: "tls-pkcs12")
+        try checkActive()
         return identity
     }
 

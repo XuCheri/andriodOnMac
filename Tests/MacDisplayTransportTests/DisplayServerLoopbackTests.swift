@@ -135,6 +135,147 @@ import AndroidOnMacCore
         #expect(server.connectionGeneration == 0)
     }
 
+    @Test func blockedTrustReadDoesNotDelayStopOrTaskCancellation() async throws {
+        guard #available(macOS 15.0, *) else { return }
+        let identity = try await LoopbackIdentity.shared.get()
+        for cancelTask in [false, true] {
+            let blocked = BlockedSecurityCall(), completion = Completion(), events = EventLog()
+            defer { blocked.release() }
+            let server = DisplayServer(readTrust: { blocked.wait(); return nil }, saveTrust: { _ in })
+            defer { server.stop() }
+            let task = Task {
+                defer { completion.finish() }
+                do { _ = try await server.start(identity: identity, lan: false, onEvent: events.append); return false }
+                catch { return error is CancellationError }
+            }
+            try await until { blocked.entered.done }
+            let started = ProcessInfo.processInfo.systemUptime
+            if cancelTask { task.cancel() } else { server.stop() }
+            try await until { completion.done }
+            #expect(ProcessInfo.processInfo.systemUptime - started < 1)
+            #expect(await task.value)
+            #expect(!blocked.exited.done)
+            let stoppedEpoch = server.connectionGeneration
+            blocked.release()
+            try await until { blocked.exited.done }
+            try await Task.sleep(nanoseconds: 50_000_000)
+            #expect(server.connectionGeneration == stoppedEpoch)
+            #expect(events.readyCount == 0)
+        }
+    }
+
+    @Test func blockedTrustReadHasAnAuthorizationTimeoutAndIgnoresLateSuccess() async throws {
+        guard #available(macOS 15.0, *) else { return }
+        let identity = try await LoopbackIdentity.shared.get(), blocked = BlockedSecurityCall(), completion = Completion()
+        defer { blocked.release() }
+        let server = DisplayServer(readTrust: { blocked.wait(); return nil }, saveTrust: { _ in }, securityTimeout: 0.1)
+        defer { server.stop() }
+        let task = Task {
+            defer { completion.finish() }
+            do { _ = try await server.start(identity: identity, lan: false) { _, _ in }; return "unexpected success" }
+            catch { return error.localizedDescription }
+        }
+        try await until { blocked.entered.done }
+        try await until { completion.done }
+        #expect(!blocked.exited.done)
+        let message = await task.value
+        #expect(message.contains("钥匙串授权超时"))
+        #expect(message.contains("原有连接身份已保留"))
+        let stoppedEpoch = server.connectionGeneration
+        blocked.release(); try await until { blocked.exited.done }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        #expect(server.connectionGeneration == stoppedEpoch)
+    }
+
+    @Test func blockedTrustWriteCannotHoldStopOrAuthenticateAnObsoletePeer() async throws {
+        guard #available(macOS 15.0, *) else { return }
+        let identity = try await LoopbackIdentity.shared.get(), blocked = BlockedSecurityCall(), events = EventLog()
+        defer { blocked.release() }
+        let server = DisplayServer(readTrust: { nil }, saveTrust: { _ in blocked.wait() })
+        defer { server.stop() }
+        let listening = try await server.start(identity: identity, lan: false, onEvent: events.append)
+        let client = TLSClient(port: listening.port, fingerprint: identity.fingerprint)
+        defer { client.stop() }
+        try await client.ready()
+        try client.send(hello(id: UUID().uuidString, channel: "control", extra: ["pairToken": listening.token]))
+        try await until { events.pairID != nil }
+        server.approve(try #require(events.pairID))
+        try await until { blocked.entered.done }
+        let started = ProcessInfo.processInfo.systemUptime
+        server.stop()
+        try await until { client.closed }
+        #expect(ProcessInfo.processInfo.systemUptime - started < 1)
+        #expect(!blocked.exited.done)
+        let stoppedEpoch = server.connectionGeneration
+        blocked.release(); try await until { blocked.exited.done }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        #expect(server.connectionGeneration == stoppedEpoch)
+        #expect(events.readyCount == 0)
+        #expect(!client.contains(type: "paired"))
+    }
+
+    @Test func identityReadCancellationNeverContinuesIntoCreationOrWrites() async throws {
+        let blocked = BlockedSecurityCall(), completion = Completion(), wrote = Completion()
+        let processes = ProcessSupervisor()
+        defer { blocked.release(); processes.shutdown() }
+        let task = Task {
+            defer { completion.finish() }
+            do {
+                _ = try await TransportIdentity.load(processes: processes,
+                    read: { _ in blocked.wait(); return nil }, write: { _, _ in wrote.finish() })
+                return false
+            } catch { return error is CancellationError }
+        }
+        try await until { blocked.entered.done }
+        task.cancel()
+        try await until { completion.done }
+        #expect(await task.value)
+        #expect(!blocked.exited.done)
+        blocked.release(); try await until { blocked.exited.done }
+        _ = try await TransportSecurityWork.run { _ in true } // Drain the serial worker, not the blocked system call.
+        #expect(!wrote.done)
+        #expect(processes.activeCount == 0)
+    }
+
+    @Test func partialOrDeniedIdentityReadsNeverGenerateReplacementIdentity() async throws {
+        let processes = ProcessSupervisor(), wrote = Completion()
+        defer { processes.shutdown() }
+        for mode in 0..<3 {
+            do {
+                _ = try await TransportIdentity.load(processes: processes, read: { account in
+                    if mode == 2 { throw LoopbackError.store }
+                    if mode == 0 { return account == "tls-pkcs12" ? Data([1, 2, 3]) : nil }
+                    return account == "tls-password" ? Data("existing".utf8) : nil
+                }, write: { _, _ in wrote.finish() })
+                Issue.record("Incomplete or inaccessible identity was silently replaced")
+            } catch {
+                if mode != 2 { #expect(error.localizedDescription.contains("未创建替代身份")) }
+            }
+        }
+        #expect(!wrote.done)
+        #expect(processes.activeCount == 0)
+    }
+
+    @Test func cancelledQueuedSecurityWorkIsSkippedAfterEarlierSystemPromptReturns() async throws {
+        let blocked = BlockedSecurityCall(), firstDone = Completion(), secondDone = Completion(), secondRan = Completion()
+        defer { blocked.release() }
+        let first = Task {
+            defer { firstDone.finish() }
+            _ = try? await TransportSecurityWork.run { _ in blocked.wait() }
+        }
+        try await until { blocked.entered.done }
+        let second = Task {
+            defer { secondDone.finish() }
+            _ = try? await TransportSecurityWork.run { _ in secondRan.finish() }
+        }
+        second.cancel(); first.cancel()
+        try await until { firstDone.done && secondDone.done }
+        #expect(!blocked.exited.done)
+        blocked.release(); try await until { blocked.exited.done }
+        _ = try await TransportSecurityWork.run { _ in true }
+        #expect(!secondRan.done)
+    }
+
     private func hello(id: String, channel: String, extra: [String: Any]) -> [String: Any] {
         ["type": "hello", "protocolVersion": 1, "deviceID": id, "deviceName": "隔离测试接收端", "channel": channel]
             .merging(extra) { _, rhs in rhs }
@@ -154,6 +295,12 @@ private final class Completion: @unchecked Sendable {
     private let lock = NSLock(); private var completed = false
     var done: Bool { lock.lock(); defer { lock.unlock() }; return completed }
     func finish() { lock.lock(); completed = true; lock.unlock() }
+}
+private final class BlockedSecurityCall: @unchecked Sendable {
+    let entered = Completion(), exited = Completion()
+    private let semaphore = DispatchSemaphore(value: 0)
+    func wait() { entered.finish(); semaphore.wait(); exited.finish() }
+    func release() { semaphore.signal() }
 }
 private final class TestTrustStore: @unchecked Sendable {
     private let lock = NSLock(); private var data: Data?
@@ -188,7 +335,7 @@ private final class EventLog: @unchecked Sendable {
 private final class TLSClient: @unchecked Sendable {
     private let queue = DispatchQueue(label: "aom.test.tls-client")
     private let lock = NSLock()
-    private var isReady = false, didFail = false
+    private var isReady = false, didFail = false, didClose = false
     private var frames: [ReverseFrame] = []
     private var parser = ReverseFrameParser()
     private let connection: NWConnection
@@ -222,6 +369,7 @@ private final class TLSClient: @unchecked Sendable {
         connection.start(queue: queue)
     }
     var failed: Bool { lock.lock(); defer { lock.unlock() }; return didFail }
+    var closed: Bool { lock.lock(); defer { lock.unlock() }; return didClose || didFail }
     var certificateRejected: Bool { rejectedPin.done }
     func ready() async throws { try await until { self.lock.lock(); defer { self.lock.unlock() }; return self.isReady } }
     func stop() { connection.cancel() }
@@ -246,6 +394,7 @@ private final class TLSClient: @unchecked Sendable {
             if let data, let received = try? self.parser.append(data) {
                 self.lock.lock(); self.frames += received; self.lock.unlock()
             }
+            if complete || error != nil { self.lock.lock(); self.didClose = true; self.lock.unlock() }
             if !complete && error == nil { self.receive() }
         }
     }
