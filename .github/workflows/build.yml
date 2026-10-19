@@ -25,6 +25,12 @@ jobs:
           distribution: temurin
           java-version: '17.0.15+6'
       - uses: android-actions/setup-android@v3
+        with:
+          # Match setup-android.sh's Command-line Tools 19.0 and SDK 35.
+          # Override the action's obsolete default "tools" package.
+          cmdline-tools-version: '13114758'
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+          log-accepted-android-sdk-licenses: 'false'
       - name: Android tests and lint
         run: |
           bash scripts/setup-android.sh
