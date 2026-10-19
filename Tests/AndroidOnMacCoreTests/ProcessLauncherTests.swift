@@ -179,6 +179,36 @@ struct ProcessLauncherTests {
         #expect(supervisor.activeCount == 0)
     }
 
+    @Test @MainActor func aHundredSerialShortLivedCommandsCompleteExactlyOnce() async throws {
+        try #require(FileManager.default.isExecutableFile(atPath: helper.path))
+        let supervisor = ProcessSupervisor()
+        defer { supervisor.shutdown() }
+        var observations = [ProcessObservation]()
+        for index in 0..<100 {
+            let observation = ProcessObservation()
+            observations.append(observation)
+            let expected = "short-command-\(index)"
+            // Launch from the UI actor, as the app does, and let the actual
+            // command exit before a background wait loop could be installed.
+            let child = try supervisor.launch(executable: URL(fileURLWithPath: "/usr/bin/printf"),
+                arguments: ["%s", expected],
+                environment: ["ANDROIDONMAC_PROCESS_LAUNCHER": helper.path], timeout: 2,
+                outputMode: index.isMultiple(of: 10) ? .lineBufferedTerminal : .pipe,
+                completion: { observation.complete($0) })
+            let completed = await waitUntil(timeout: 3) { observation.result != nil }
+            #expect(completed, "Short command \(index) lost its termination callback")
+            guard let outcome = observation.result else { child.stop(); return }
+            let result = try outcome.get()
+            #expect(result.exitCode == 0)
+            #expect(result.stdout == expected)
+            #expect(supervisor.activeCount == 0)
+        }
+        // Also catch a late duplicate callback, which would double-resume run's
+        // checked continuation even when the first result appeared successful.
+        try await Task.sleep(nanoseconds: 50_000_000)
+        #expect(observations.allSatisfy { $0.completionCount == 1 })
+    }
+
     private func isAlive(_ pid: Int32) -> Bool { kill(pid, 0) == 0 || errno == EPERM }
 
     private func readPID(_ file: URL) -> Int32? {
@@ -200,11 +230,13 @@ private final class ProcessObservation: @unchecked Sendable {
     private let lock = NSLock()
     private var text = ""
     private var outcome: Result<ProcessResult, Error>?
+    private var completions = 0
 
     func append(_ value: String) { lock.lock(); text += value; lock.unlock() }
-    func complete(_ value: Result<ProcessResult, Error>) { lock.lock(); outcome = value; lock.unlock() }
+    func complete(_ value: Result<ProcessResult, Error>) { lock.lock(); outcome = value; completions += 1; lock.unlock() }
     var result: Result<ProcessResult, Error>? { lock.lock(); defer { lock.unlock() }; return outcome }
     var output: String { lock.lock(); defer { lock.unlock() }; return text }
+    var completionCount: Int { lock.lock(); defer { lock.unlock() }; return completions }
     var descendantPID: Int32? {
         lock.lock(); defer { lock.unlock() }
         guard let marker = text.range(of: "DESCENDANT:") else { return nil }

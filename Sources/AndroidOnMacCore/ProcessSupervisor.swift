@@ -166,8 +166,19 @@ public final class ManagedChild {
         if case .lineBufferedTerminal = outputMode { terminal = try Self.makeOutputTerminal() }
         else { terminal = nil }
         if let terminal { process.standardOutput = terminal.writer }
+        let handles = [(terminal?.reader ?? outputPipe.fileHandleForReading, false),
+                       (errorPipe.fileHandleForReading, true)]
+        let readers = DispatchGroup()
+        // Register readers and the exit observer before launching. A short-lived
+        // command may exit before run() returns or before its readers are queued.
+        handles.forEach { _ in readers.enter() }
+        process.terminationHandler = { [self] terminated in
+            observeTermination(exitCode: terminated.terminationStatus, readers: readers)
+        }
         do { try process.run() }
         catch {
+            process.terminationHandler = nil
+            handles.forEach { _ in readers.leave() }
             try? terminal?.reader.close()
             try? terminal?.writer.close()
             throw error
@@ -175,10 +186,7 @@ public final class ManagedChild {
         // FileHandle-backed descriptors are not automatically closed in the
         // launching parent. Leave the terminal slave solely with the child.
         try? terminal?.writer.close()
-        let readers = DispatchGroup()
-        for (handle, isError) in [(terminal?.reader ?? outputPipe.fileHandleForReading, false),
-                                 (errorPipe.fileHandleForReading, true)] {
-            readers.enter()
+        for (handle, isError) in handles {
             DispatchQueue.global(qos: .utility).async { [self] in
                 defer { try? handle.close(); readers.leave() }
                 read(handle.fileDescriptor, isError: isError)
@@ -190,30 +198,40 @@ public final class ManagedChild {
         }
         if let timeout {
             let work = DispatchWorkItem { [weak self] in self?.stop(reason: .timedOut) }
-            lock.lock(); timeoutWork = work; lock.unlock()
-            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout, execute: work)
-        }
-        DispatchQueue.global(qos: .utility).async { [self] in
-            process.waitUntilExit()
-            // An inherited writer may survive if a helper is unavailable or a
-            // subprocess deliberately leaves its process group. Never wait for
-            // its EOF indefinitely. poll/read use nonblocking descriptors, and
-            // each reader owns closing its own handle (no cross-thread close).
             lock.lock()
-            pipeDeadline = ProcessInfo.processInfo.systemUptime + 0.5
-            timeoutWork?.cancel()
+            let needsTimeout = pipeDeadline == nil && !finished
+            if needsTimeout { timeoutWork = work }
             lock.unlock()
-            readers.wait()
+            if needsTimeout {
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout, execute: work)
+            }
+        }
+    }
+
+    private func observeTermination(exitCode: Int32, readers: DispatchGroup) {
+        // Foundation waitUntilExit() runs a thread-local run loop. Waiting from
+        // a different worker than the launching thread can leave that run loop
+        // asleep after a short-lived task has already gone. The pre-registered
+        // handler observes every exit without creating a blocking waiter.
+        lock.lock()
+        guard pipeDeadline == nil else { lock.unlock(); return }
+        pipeDeadline = ProcessInfo.processInfo.systemUptime + 0.5
+        timeoutWork?.cancel()
+        lock.unlock()
+        readers.notify(queue: .global(qos: .utility)) { [self] in
             lock.lock()
             finished = true
             timeoutWork?.cancel()
             let reason = stopReason
-            let result = ProcessResult(exitCode: process.terminationStatus,
+            let result = ProcessResult(exitCode: exitCode,
                                        stdout: String(decoding: out, as: UTF8.self),
                                        stderr: String(decoding: err, as: UTF8.self))
             lock.unlock()
             completion(reason.map { .failure($0) } ?? .success(result))
         }
+        // Break the process -> handler -> owner retain cycle after an exit has
+        // been observed. The reader notification now owns the final completion.
+        process.terminationHandler = nil
     }
 
     private static func makeOutputTerminal() throws -> (reader: FileHandle, writer: FileHandle) {

@@ -302,12 +302,16 @@ final class AppModel: ObservableObject {
                 self.launchSession(device: device, generation: next)
             }
         case .stop(let reason):
+            let wireless = sessionDevice?.transport == .wifi
             mirror?.stop(); mirror = nil
             sessionTask?.cancel()
             phase = .failed
             sessionDevice = nil
             sessionIdentity = nil
-            show(reason == .retryLimitReached ? "重连未成功。请检查数据线，或重新打开手机无线调试并更新连接端口。" : detail, error: true)
+            let recovery = wireless
+                ? "无线重连未成功。请在手机确认“无线调试”仍开启，并保持同一 Wi-Fi；若开关已关闭，请重新开启，再从已保存设备重新连接。"
+                : "重连未成功。请检查 USB 数据线，并在手机确认调试授权。"
+            show(reason == .retryLimitReached ? recovery : detail, error: true)
         }
     }
 
