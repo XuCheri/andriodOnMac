@@ -1,0 +1,13 @@
+Copyright (c) 2026 XuCheri. All rights reserved.
+
+The above notice applies only to the original AndroidOnMac application,
+documentation, and packaging scripts. No public license is granted for those
+original works by this notice, except for the redistribution and rebuilding
+materials expressly covered by docs/REBUILD_MATERIALS_LICENSE.txt.
+
+Third-party components and their source distributions retain their original
+licenses and permissions. Nothing in this notice restricts rights granted by
+those licenses, including the right to modify, rebuild, replace, or reverse
+engineer LGPL-covered components for debugging modifications. See
+THIRD_PARTY_NOTICES.md and the license files included in the application and
+its corresponding third-party source archive.

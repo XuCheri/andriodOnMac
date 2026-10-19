@@ -1,0 +1,77 @@
+name: macOS preview
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-preview-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check build host
+        run: |
+          test "$(uname -m)" = arm64
+          swift --version
+          python3 -c 'import re, subprocess; version = subprocess.check_output(["swift", "--version"], text=True); match = re.search(r"Swift version (\d+)", version); assert match and int(match.group(1)) >= 6, "Swift 6+ is required"'
+      - name: Check scripts and run Swift Testing
+        run: |
+          for script in scripts/*.sh; do bash -n "$script"; done
+          PYTHONPYCACHEPREFIX="$PWD/.cache/pycache" python3 -m py_compile scripts/fetch-dependencies.py
+          bash scripts/fetch-engine.sh
+          bash scripts/test.sh
+          git diff --check
+      - name: Build preview application
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          APP_BUILD: ${{ github.run_number }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            APP_VERSION="${RELEASE_TAG#v}"
+            export APP_VERSION="${APP_VERSION%%-*}"
+          fi
+          bash scripts/build-app.sh
+          bash scripts/package-release.sh
+      - name: Upload app and mandatory source companion
+        uses: actions/upload-artifact@v7
+        with:
+          name: AndroidOnMac-preview-arm64
+          if-no-files-found: error
+          path: |
+            dist/*.dmg
+            dist/*.zip
+            dist/*-third-party-sources.tar.gz
+            dist/*-SHA256SUMS.txt
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          name: AndroidOnMac-preview-arm64
+          path: dist
+      - name: Publish preview release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" dist/* \
+            --verify-tag --prerelease \
+            --title "AndroidOnMac $RELEASE_TAG 预览版" \
+            --notes-file docs/RELEASE_NOTES.md
