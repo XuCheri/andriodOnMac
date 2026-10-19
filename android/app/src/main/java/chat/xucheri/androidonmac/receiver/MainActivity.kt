@@ -213,6 +213,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     }
     private fun pointer(action: String, x: Float, y: Float) {
         val point = ContentCoordinates.point(x, y, surface.width, surface.height) ?: return
+        if (action != "move" && action != "up") remoteInput.invalidateRemoteContext()
         session?.input(JSONObject().put("type", "input").put("action", action).put("x", point.x).put("y", point.y))
     }
     private fun sendKey(key: String) { session?.input(JSONObject().put("type", "input").put("action", "key").put("key", key)) }

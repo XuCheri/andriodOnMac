@@ -1,6 +1,7 @@
 package chat.xucheri.androidonmac.receiver
 
 import android.content.Context
+import android.os.SystemClock
 import android.text.Editable
 import android.text.InputType
 import android.text.Selection
@@ -14,16 +15,18 @@ import android.view.inputmethod.CompletionInfo
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
+import android.widget.Toast
 
 /** Focusable IME endpoint, normally attached as a visible 1×1 view beside the video. */
 class RemoteInputView @JvmOverloads constructor(context: Context, attrs: AttributeSet? = null) : View(context, attrs) {
     var onText: (String) -> Unit = {}
     var onKey: (String) -> Unit = {}
-    private val state = RemoteImeState { output ->
-        when (output) {
-            is RemoteImeState.Output.Text -> onText(output.value)
-            is RemoteImeState.Output.Key -> onKey(output.value)
-        }
+    private val outputQueue = RemoteInputQueue()
+    private var draining = false
+    private val drain = Runnable { drainOutput() }
+    private var lastInputNotice = Long.MIN_VALUE
+    private val state = RemoteImeState(::queueOutput).apply {
+        canEmit = { count -> outputQueue.canAccept(count).also { if (!it) rejectedInput() } }
     }
     private val inputMethod get() = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
     private var connection: RemoteConnection? = null
@@ -52,13 +55,49 @@ class RemoteInputView @JvmOverloads constructor(context: Context, attrs: Attribu
     }
     fun hideKeyboard() {
         inputMethod.hideSoftInputFromWindow(windowToken, 0)
+        clearOutput()
         state.invalidate(); connection?.discard(); connection = null
         handledKeys.clear(); deadAccent = 0; clearFocus()
+    }
+    /** A remote pointer may change the caret; never reuse the previous field's text tail. */
+    fun invalidateRemoteContext() {
+        clearOutput()
+        state.invalidate(); connection?.discard(); connection = null
+        handledKeys.clear(); deadAccent = 0
+        if (state.enabled && hasFocus()) inputMethod.restartInput(this)
+    }
+    private fun queueOutput(value: RemoteImeState.Output) {
+        outputQueue.add(state.generation, value)
+        drainOutput()
+    }
+    private fun drainOutput() {
+        if (draining) return
+        removeCallbacks(drain)
+        draining = true
+        try {
+            while (true) {
+                val next = outputQueue.poll(SystemClock.uptimeMillis(), state::accepts) ?: break
+                when (val value = next.value) {
+                    is RemoteImeState.Output.Text -> onText(value.value)
+                    is RemoteImeState.Output.Key -> onKey(value.value)
+                }
+            }
+        } finally { draining = false }
+        outputQueue.delayMillis(SystemClock.uptimeMillis())?.let { postDelayed(drain, it) }
+    }
+    private fun clearOutput() { removeCallbacks(drain); outputQueue.clear() }
+    private fun rejectedInput() {
+        val now = SystemClock.uptimeMillis()
+        if (lastInputNotice == Long.MIN_VALUE || now - lastInputNotice > 2000) {
+            lastInputNotice = now
+            Toast.makeText(context, "本次输入过长或仍在发送，请稍后分段输入。", Toast.LENGTH_SHORT).show()
+        }
     }
 
     override fun onCheckIsTextEditor() = state.enabled
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? {
         if (!state.enabled) return null
+        clearOutput()
         connection?.discard()
         handledKeys.clear(); deadAccent = 0
         outAttrs.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
@@ -116,7 +155,7 @@ class RemoteInputView @JvmOverloads constructor(context: Context, attrs: Attribu
     private inner class RemoteConnection(private val generation: Long) : BaseInputConnection(this@RemoteInputView, true) {
         private val buffer = SpannableStringBuilder()
         private var closed = false
-        private var batchDepth = 0
+        private val batch = RemoteBatchEdit()
         init { Selection.setSelection(buffer, 0) }
         private fun current() = !closed && state.accepts(generation)
         override fun getEditable(): Editable = buffer
@@ -127,31 +166,31 @@ class RemoteInputView @JvmOverloads constructor(context: Context, attrs: Attribu
             buffer.replace(0, buffer.length, state.composingText)
             Selection.setSelection(buffer, state.selectionStart, state.selectionEnd)
             if (buffer.isNotEmpty()) setComposingSpans(buffer)
-            if (batchDepth == 0) inputMethod.updateSelection(this@RemoteInputView, state.selectionStart, state.selectionEnd,
+            if (!batch.active) inputMethod.updateSelection(this@RemoteInputView, state.selectionStart, state.selectionEnd,
                 if (buffer.isEmpty()) -1 else 0, if (buffer.isEmpty()) -1 else buffer.length)
         }
-        private fun edit(action: () -> Boolean): Boolean {
+        private fun edit(notifyOnRejection: Boolean = false, action: () -> Boolean): Boolean {
             if (!current()) return false
-            return action().also { if (it) refresh() }
+            return action().also { if (it) refresh() else if (notifyOnRejection && current()) rejectedInput() }
         }
         override fun setComposingText(text: CharSequence?, newCursorPosition: Int) = edit { state.compose(generation, text?.toString() ?: "", newCursorPosition) }
-        override fun commitText(text: CharSequence?, newCursorPosition: Int) = edit { state.commit(generation, text?.toString() ?: "") }
-        override fun finishComposingText() = edit { state.finish(generation) }
+        override fun commitText(text: CharSequence?, newCursorPosition: Int) = edit(true) { state.commit(generation, text?.toString() ?: "") }
+        override fun finishComposingText() = edit(true) { state.finish(generation) }
         override fun setSelection(start: Int, end: Int) = edit { state.select(generation, start, end) }
         override fun setComposingRegion(start: Int, end: Int): Boolean = current() && minOf(start, end) == 0 && maxOf(start, end) == buffer.length
         override fun deleteSurroundingText(beforeLength: Int, afterLength: Int) = edit { state.delete(generation, beforeLength, afterLength) }
         override fun deleteSurroundingTextInCodePoints(beforeLength: Int, afterLength: Int) = edit { state.delete(generation, beforeLength, afterLength, true) }
         override fun sendKeyEvent(event: KeyEvent): Boolean = current() && handleHardwareKey(event)
         override fun performEditorAction(editorAction: Int) = edit { state.key(generation, "enter") }
-        override fun commitCompletion(text: CompletionInfo?): Boolean = edit { state.commit(generation, text?.text?.toString() ?: "") }
+        override fun commitCompletion(text: CompletionInfo?): Boolean = edit(true) { state.commit(generation, text?.text?.toString() ?: "") }
         override fun performContextMenuAction(id: Int): Boolean {
             val command = when (id) { android.R.id.copy -> "copy"; android.R.id.paste -> "paste"; android.R.id.cut -> "cut"; android.R.id.selectAll -> "selectAll"; else -> return false }
             return edit { state.key(generation, command) }
         }
-        override fun beginBatchEdit(): Boolean { if (!current()) return false; batchDepth = (batchDepth + 1).coerceAtMost(64); return true }
-        override fun endBatchEdit(): Boolean { if (!current()) return false; batchDepth = (batchDepth - 1).coerceAtLeast(0); refresh(); return true }
+        override fun beginBatchEdit(): Boolean = current() && batch.begin()
+        override fun endBatchEdit(): Boolean { if (!current()) return false; val active = batch.end(); refresh(); return active }
         override fun closeConnection() {
-            if (current()) state.invalidate() // Never commit unfinished candidates on rotation/stop.
+            if (current()) { clearOutput(); state.invalidate() } // Never commit unfinished candidates on rotation/stop.
             discard(); super.closeConnection()
         }
     }

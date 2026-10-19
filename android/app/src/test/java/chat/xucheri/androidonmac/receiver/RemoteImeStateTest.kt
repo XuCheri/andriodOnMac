@@ -72,7 +72,7 @@ class RemoteImeStateTest {
         assertEquals("niha", f.state.composingText); assertTrue(f.output.isEmpty())
         f.state.delete(f.token, 6, 0)
         assertEquals("", f.state.composingText)
-        assertEquals(listOf(f.key("backspace"), f.key("backspace")), f.output)
+        assertTrue(f.output.isEmpty()) // Never infer keys for an unknown remote prefix.
     }
 
     @Test fun forwardDeleteAndCursorPositionRespectLocalComposition() {
@@ -83,7 +83,7 @@ class RemoteImeStateTest {
         f.state.select(f.token, 1, 1)
         f.state.delete(f.token, 1, 3)
         assertEquals("", f.state.composingText)
-        assertEquals(listOf(f.key("delete")), f.output)
+        assertTrue(f.output.isEmpty())
     }
 
     @Test fun codePointDeletionNeverSplitsEmojiSurrogates() {
@@ -187,6 +187,116 @@ class RemoteImeStateTest {
         }
         assertFalse(f.state.delete(f.token, -1, 0)); assertFalse(f.state.delete(f.token, 101, 0))
         assertFalse(f.state.select(f.token, -1, 0)); assertFalse(f.state.select(f.token, 0, 100))
+        assertEquals("keep", f.state.composingText); assertTrue(f.output.isEmpty())
+    }
+
+    @Test fun committedEmojiUtf16DeletionSendsOneBackspaceWithoutDeletingItsPrefix() {
+        val f = Fixture()
+        f.state.commit(f.token, "a🙂")
+        f.output.clear()
+        f.state.delete(f.token, 2, 0)
+        assertEquals(listOf(f.key("backspace")), f.output)
+        f.output.clear()
+        f.state.delete(f.token, 100, 0)
+        assertEquals(listOf(f.key("backspace")), f.output) // Only the known "a".
+    }
+
+    @Test fun committedExtendedGraphemesAreNotExpandedIntoMultipleMacDeletes() {
+        for (cluster in listOf("👨‍👩‍👧‍👦", "👩🏽‍💻", "🇨🇳", "e\u0301")) {
+            for (codePoints in listOf(false, true)) {
+                val f = Fixture()
+                f.state.commit(f.token, "keep" + cluster)
+                f.output.clear()
+                val units = if (codePoints) cluster.codePointCount(0, cluster.length) else cluster.length
+                f.state.delete(f.token, units, 0, codePoints)
+                assertEquals(cluster, listOf(f.key("backspace")), f.output)
+            }
+        }
+    }
+
+    @Test fun composingDeletionCanReachOnlyTheKnownCommittedTail() {
+        val f = Fixture()
+        f.state.commit(f.token, "🙂"); f.output.clear()
+        f.state.compose(f.token, "ni")
+        f.state.delete(f.token, 20, 0)
+        assertEquals("", f.state.composingText)
+        assertEquals(listOf(f.key("backspace")), f.output)
+    }
+
+    @Test fun pointerOrNavigationInvalidationCannotReuseAnotherFieldsTail() {
+        val f = Fixture()
+        f.state.commit(f.token, "old🙂")
+        val next = f.state.openConnection()
+        f.output.clear()
+        f.state.delete(next, 2, 0)
+        assertTrue(f.output.isEmpty())
+        f.state.commit(next, "new🙂"); f.state.key(next, "left")
+        f.output.clear()
+        f.state.delete(next, 2, 0)
+        assertTrue(f.output.isEmpty())
+        f.state.key(next, "backspace")
+        assertEquals(listOf(f.key("backspace")), f.output) // Explicit single keys remain useful.
+    }
+
+    @Test fun batchNestingReturnsFalseWhenTheLastBatchEnds() {
+        val batch = RemoteBatchEdit()
+        assertFalse(batch.end())
+        assertTrue(batch.begin()); assertTrue(batch.begin())
+        assertTrue(batch.end()); assertTrue(batch.active)
+        assertFalse(batch.end()); assertFalse(batch.active)
+        repeat(64) { assertTrue(batch.begin()) }
+        assertFalse(batch.begin())
+        repeat(63) { assertTrue(batch.end()) }
+        assertFalse(batch.end())
+    }
+
+    @Test fun ordinaryInputHasNoDelayAndBulkInputStaysBelowControlRateLimits() {
+        val queue = RemoteInputQueue()
+        val value = RemoteImeState.Output.Key("enter")
+        queue.add(1, value)
+        assertEquals(value, queue.poll(0) { true }?.value)
+        assertNull(queue.delayMillis(0))
+        repeat(1000) { queue.add(1, value) }
+        var sent = 1
+        for (time in 0L..999L) while (queue.poll(time) { true } != null) sent++
+        assertTrue(sent in 100..112)
+        assertEquals(1001 - sent, queue.size)
+        var time = 1000L
+        while (queue.size > 0) {
+            while (queue.poll(time) { true } != null) sent++
+            time += queue.delayMillis(time) ?: 0
+        }
+        assertEquals(1001, sent)
+    }
+
+    @Test fun queuedOldGenerationAndExplicitStopDiscardUnsentText() {
+        val queue = RemoteInputQueue()
+        repeat(20) { queue.add(1, RemoteImeState.Output.Text("old")) }
+        queue.add(2, RemoteImeState.Output.Text("new"))
+        assertEquals("new", (queue.poll(0) { it == 2L }?.value as RemoteImeState.Output.Text).value)
+        assertEquals(0, queue.size)
+        queue.add(2, RemoteImeState.Output.Text("discard")); queue.clear()
+        assertNull(queue.poll(1) { true })
+    }
+
+    @Test fun queueAdmissionRejectsWholeEditsWithoutLosingCompositionOrSendingAPrefix() {
+        val queue = RemoteInputQueue()
+        val f = Fixture()
+        f.state.canEmit = queue::canAccept
+        repeat(RemoteInputQueue.MAX_PENDING - 1) { queue.add(1, f.key("enter")) }
+        f.state.compose(f.token, "keep")
+        assertFalse(f.state.commit(f.token, "first\nsecond"))
+        assertFalse(f.state.key(f.token, "enter"))
+        assertEquals("keep", f.state.composingText); assertTrue(f.output.isEmpty())
+        queue.clear()
+        assertTrue(f.state.finish(f.token))
+        assertEquals(listOf(f.text("keep")), f.output)
+    }
+
+    @Test fun oversizedMultilineEditIsRejectedBeforeAnyInputIsEmitted() {
+        val f = Fixture()
+        f.state.compose(f.token, "keep")
+        assertFalse(f.state.commit(f.token, "\n".repeat(RemoteInputQueue.MAX_PENDING + 1)))
         assertEquals("keep", f.state.composingText); assertTrue(f.output.isEmpty())
     }
 }
