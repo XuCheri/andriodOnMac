@@ -24,6 +24,7 @@ final class AppModel: ObservableObject {
     @Published var connectionPort = ""
     @Published var pairingCode = ""
     @Published var showWirelessSheet = false
+    @Published var externalSessionActive = false
 
     private let processes = ProcessSupervisor()
     private let paths: EnginePaths?
@@ -46,7 +47,7 @@ final class AppModel: ObservableObject {
     private var started = false
 
     var selectedDevice: AndroidDevice? { devices.first { $0.serial == selectedSerial } }
-    var canConnect: Bool { selectedDevice?.isReady == true && !hasActiveSession && !busy && paths != nil }
+    var canConnect: Bool { selectedDevice?.isReady == true && !hasActiveSession && !externalSessionActive && !busy && paths != nil }
     var engineStatus: String {
         paths == nil ? "连接引擎缺失，请重新安装完整应用。" : "scrcpy 5.0.1 · ADB 37.0.1 · 已内置"
     }

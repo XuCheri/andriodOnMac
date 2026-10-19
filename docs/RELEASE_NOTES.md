@@ -1,16 +1,23 @@
-AndroidOnMac 预览版：在 Apple Silicon Mac 上通过 USB / 同一局域网查看并操控自己授权的 Android 手机，内置 scrcpy 5.0.1 和 ADB。
+# AndroidOnMac 0.2.0-preview.1
 
-- 要求 macOS 13+，当前仅 arm64；无需 Homebrew。
-- Android 11+ 无线配对请区分配对端口与连接端口。
-- 包含 DMG、ZIP、SHA-256 和配套第三方完整源包；FFmpeg / libusb 等重新链接材料在源包中。
-- 当前为 ad-hoc 签名，未获 Apple 公证；按安装文档使用系统“隐私与安全性 → 仍要打开”，不关闭 Gatekeeper。
-- 真机的性能、中文输入、音频和长期稳定性以验收记录为准；构建检查不能替代真机验收。
-- 当前不支持跨公网远控，未部署 ECS 或公网 ADB 服务。
+新增原生双向工作区和 Android 接收端：除了在 Mac 上查看、操控 Android，现在也可以将 Mac 屏幕镜像到 Android，或尝试把 Android 用作独立扩展副屏。
 
-本次验证：Mac mini M2 / macOS 26.4.1 与 Xiaomi 23117RK66C / Android 16。用户已确认 USB 和 Wi-Fi 的画面、点击滑动正常，并反馈中文粘贴正常；音频暂未测试。52 项自动测试、release 构建与本地应用签名/内置依赖检查通过。精确时延、持续帧率、30 分钟稳定性及剩余真机项目见 [验收记录](https://github.com/XuCheri/andriodOnMac/blob/main/docs/ACCEPTANCE.md)。
+- Mac 要求 Apple Silicon、macOS 13+；新增接收端要求 Android 11+。
+- Mac → 手机支持 USB 与同一 Wi-Fi 扫码。Wi-Fi 扫码不依赖 Android 无线调试；新设备需要在 Mac 确认。
+- 支持手机触控、常用快捷键和手机键盘直接输入；中文组词确认后进入 Mac，并支持回车、退格和 Delete。Mac 需授予屏幕录制权限，触控与输入另需辅助功能权限。
+- 手机常驻“键盘”、横／竖屏切换和“更多”；全屏、声音、快捷键和停止共享放入“更多”。新输入方式与手动旋转仍待真机专项验收。
+- Mac 系统声音使用 AAC，默认关闭，开始前可开启。手机进入后台、锁屏或主动停止会结束共享，返回后需主动连接。
+- 扩展副屏使用未公开的 macOS 接口，为实验性功能。显式选择请求的非 HiDPI 模式，修复系统默认选择较小桌面的问题；没有对应模式时明确提示。失败时可以切回镜像；停止时回收本应用创建的显示器。
+- 保留原有手机 → Mac 的 scrcpy 5.0.1 功能。其 Android 11+ 无线调试仍需区分配对端口和连接端口。
 
-已知真机问题：该手机短时无线会话后出现过无线调试开关自行关闭，Mac 检测到服务消失后有限重试并停止。触发原因仍待复现，无线稳定性尚未通过验收；需要持续使用可先选择 USB。
+本次 Mac → 手机已由用户确认 USB 镜像画面、点击拖动、独立副屏和中文输入正常；系统确认副屏没有镜像主屏，Mac 辅助功能检查读到手机输入的新增中文。主动停止后仅剩原主屏、ADB reverse 列表为空，原文稿可见。
 
-此软件使用 FFmpeg（LGPL-2.1-or-later）等组件。完整对应源码、许可和重建入口可在本 Release 的 `*-third-party-sources.tar.gz` 下载。
+同一 Wi-Fi 扫码连接后，用户确认拔掉 USB 仍能正常显示和触控；Mac 管理界面确认 Wi-Fi 模式及真实渲染 ACK。该连接不依赖 Android 无线调试，但未检测手机无线调试开关状态。
 
-源码附件覆盖 scrcpy 及其库；Google 预编译 ADB 的完整官方 NOTICE 已保留，但精确构建源码映射仍未核实，详见 [来源范围](https://github.com/XuCheri/andriodOnMac/blob/main/docs/THIRD_PARTY_SOURCES.md)。当前仅交付个人私有预览。
+虚拟显示辅助程序的 1280 × 720、1920 × 1080 逻辑与像素模式、TERM／自动退出及原布局恢复均已实测通过；AAC 的交错／非交错 PCM 转换测试和 Mac release 构建通过。**新版手机键盘直接输入、手动旋转、音频及 30 分钟稳定性仍待专项验收。** USB 短时 ACK 快照约 56–58 fps，Wi-Fi 约 58 fps，接收队列均为 0，不能证明持续 60 fps。Wi-Fi 的约 81 秒首帧读数包含扫码等人工等待，不作为性能证据；首次 USB 连接与其他单次副屏连接读数也不构成首帧性能达标证据。当前不承诺固定端到端延迟。
+
+保留的 0.1.0 历史结果：Mac mini M2 / macOS 26.4.1 与 Xiaomi 23117RK66C / Android 16 的 USB、Wi-Fi 画面和点击滑动由用户确认，中文粘贴反馈正常；音频未测试。该手机曾在短时无线会话后自行关闭 Android 无线调试，原因未确定，无线稳定性未通过。此记录属于旧的手机 → Mac 调试链路，不是新增扫码链路的验收结果。详见 [分版本验收记录](https://github.com/XuCheri/andriodOnMac/blob/main/docs/ACCEPTANCE.md)。
+
+发行附件包含 Mac DMG／ZIP、持久身份签名的 Android APK、SHA-256 和第三方源码附件。Mac 仍为 ad-hoc 签名、未公证；确认来源后按系统“隐私与安全性 → 仍要打开”处理，不关闭 Gatekeeper。使用步骤见 [用户指南](https://github.com/XuCheri/andriodOnMac/blob/main/docs/USER_GUIDE.md)。
+
+第三方源码附件覆盖 scrcpy 及其库的重建和重新链接。Google 预编译 ADB 的完整官方 NOTICE 已保留，但精确源码、补丁与构建对应关系仍未核实，附件不承诺重建 ADB。新增 DeskPad MIT 与 Android Apache-2.0 组件声明随包保留，接收端可在“连接选项 → 开源许可”查看。本次通过公有 GitHub 仓库发布预览，不提供跨公网中继或 ECS 服务。

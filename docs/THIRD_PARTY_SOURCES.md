@@ -1,6 +1,6 @@
 # 对应源码与重新链接
 
-每个 AndroidOnMac 预览二进制发行版必须在同一 GitHub Release 附上 `AndroidOnMac-<版本>-preview-arm64-third-party-sources.tar.gz`。这个附件供接收者复制、修改、重建和替换第三方组件，不要求访问 AndroidOnMac 的私有源码仓库。请勿只转发二进制而遗漏此附件。
+每个 AndroidOnMac 预览二进制发行版必须在同一 GitHub Release 附上 `AndroidOnMac-<版本>-preview-arm64-third-party-sources.tar.gz`。这个附件供接收者复制、修改、重建和替换所覆盖的第三方组件，包含 scrcpy 及其库的独立重建材料。本项目源码位于公有 GitHub 仓库。请勿只转发二进制而遗漏此附件。
 
 附件解压后的 `compliance/` 包含：
 
@@ -14,7 +14,7 @@ FFmpeg / libusb 使用 LGPL。提供其完整对应源代码，以及使用这�
 
 ## ADB 来源与未核实范围
 
-ADB 37.0.1 使用 Google 官方预编译版本，二进制与官方 Platform Tools ZIP 中的 `adb` 完全一致，SHA-256 为 `1811e253b21b12cbfda7201ebaf86c10e7ddcb5c606a7a81f7c82b4c429c2d3b`。1,152,421 字节的官方完整 `NOTICE.txt` 原样保留，SHA-256 为 `356cc66516060e4da6bdc53e6f0bbb8e8101673f326b73c68d535eddd04dd7b1`。下载脚本独立校验这两个成员。
+ADB 37.0.1 使用 Google 官方预编译版本；下载缓存中、打包签名前的二进制与官方 Platform Tools ZIP 中的 `adb` 完全一致，SHA-256 为 `1811e253b21b12cbfda7201ebaf86c10e7ddcb5c606a7a81f7c82b4c429c2d3b`。1,152,421 字节的官方完整 `NOTICE.txt` 原样保留，SHA-256 为 `356cc66516060e4da6bdc53e6f0bbb8e8101673f326b73c68d535eddd04dd7b1`。下载脚本独立校验这两个成员。
 
 2026-10-19 的静态检查发现 ADB arm64 含 libusb 实现，`libusb_get_version()` 指向的版本结构为 1.0.29、nano 11982；`otool -L` 只列系统库。它与本包中为 scrcpy 提供的 libusb 1.0.30 源码不是同一版本。Google [37.0.1 发布说明](https://developer.android.com/tools/releases/platform-tools)也说明 macOS 可通过 `ADB_LIBUSB=1` 启用该后端。
 
@@ -26,7 +26,7 @@ ADB 37.0.1 使用 Google 官方预编译版本，二进制与官方 Platform Too
 
 当日三个仓库的公开 refs 返回的 `platform-tools-*` 版本最高为 35.0.2，未发现 37.0.1 对应标签；`sdk-release` 分支的 libusb 版本文件为 1.0.27，也不能作为此二进制的对应源码。我们未核实 ADB 37.0.1 精确提交、所含 libusb 补丁及完整重新链接材料，不能用通用仓库入口或 scrcpy 源包替代这些证据。完整官方 NOTICE 不含 libusb 名称；本附件保留 LGPL 文本，但不声称已经填补 ADB 来源缺口。
 
-当前附件支持用户个人私有预览的来源核对；`rebuild-engine.sh` 仅重建 scrcpy，不重建或重新链接 ADB。公开再分发前需另行补齐 ADB 的精确对应材料，或审查由使用者直接获取官方 ADB 的交付方式；当前实现没有改变依赖版本或获取流程。
+`rebuild-engine.sh` 仅重建 scrcpy，不重建或重新链接 ADB。当前公有预览仍使用上述官方 ADB，未改变版本或获取流程；公开发布不等于已核实其精确对应源码。ADB 的对应材料与静态依赖重新链接范围仍是明确的未完成项，不能把本附件描述为所有内置二进制的完整重建方案。
 
 ## 构建条件
 
@@ -63,3 +63,9 @@ codesign --force --sign - /你的路径/AndroidOnMac.app
 FFmpeg、SDL、libusb、dav1d 的版本和校验和来自 scrcpy v5.0.1 的固定构建脚本。zlib 1.3.2 来自该官方二进制中的版本标识，与 [zlib 官方发布及校验和](https://zlib.net/) 对应。二进制 `otool -L` 检查不依赖 Homebrew 动态库。
 
 六个 scrcpy 及库源码包的下载、校验、许可提取及附件生成由打包脚本执行并验证。首次预览没有把“完整重新编译所有第三方库”作为已完成测试；若构建环境产生兼容问题，应保留日志并修复入口，不把拥有源码等同于已经完成重建回归。ADB 来源范围以本页上方的单独说明为准。
+
+## 0.2.0 新增组件的材料位置
+
+本附件的六个源码包仍仅覆盖 scrcpy 及其库。Mac 采集模块、虚拟显示 helper 与 Android 接收端的源文件位于本项目公有仓库，不应误称已经包含在这六个上游源码包中。
+
+DeskPad 的 MIT 原文保留在 `Sources/VirtualDisplayHelper/DESKPAD_LICENSE.txt` 并随 Mac App 分发。Android 依赖版本、锁与校验文件位于 `android/`，完整组件声明位于 `android/licenses/` 和 APK 的 `assets/THIRD_PARTY_NOTICES.txt`；具体包内路径见 [第三方声明](../THIRD_PARTY_NOTICES.md)。这些新增声明不会补齐或改变前述 ADB 来源缺口。

@@ -13,6 +13,11 @@ struct MainView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
                     heading
+                    if model.externalSessionActive {
+                        Label("Mac → 手机正在运行。开始此方向的投屏前，请用顶部按钮停止当前会话。", systemImage: "info.circle")
+                            .font(.callout).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     if let message = model.message {
                         MessageBanner(message: message, isError: model.isError, dismiss: { model.clearMessage() })
                     }

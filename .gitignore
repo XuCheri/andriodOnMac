@@ -7,3 +7,10 @@ dist/
 .env
 *.pem
 *.key
+*.jks
+*.keystore
+*.p12
+*.password
+android/.gradle/
+android/**/build/
+android/local.properties

@@ -1,4 +1,4 @@
-name: macOS preview
+name: AndroidOnMac preview
 
 on:
   push:
@@ -15,11 +15,58 @@ concurrency:
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17.0.15+6'
+      - uses: android-actions/setup-android@v3
+      - name: Android tests and lint
+        run: |
+          bash scripts/setup-android.sh
+          GRADLE_USER_HOME="$PWD/.cache/android-toolchain/gradle-home" .cache/android-toolchain/gradle-8.11.1/bin/gradle -p android --no-daemon testDebugUnitTest lintRelease assembleRelease
+      - name: Sign receiver with persistent release identity
+        if: github.event_name != 'pull_request'
+        env:
+          AOM_ANDROID_KEYSTORE_B64: ${{ secrets.AOM_ANDROID_KEYSTORE_B64 }}
+          AOM_ANDROID_STORE_PASSWORD: ${{ secrets.AOM_ANDROID_STORE_PASSWORD }}
+          AOM_ANDROID_KEY_PASSWORD: ${{ secrets.AOM_ANDROID_KEY_PASSWORD }}
+          AOM_ANDROID_KEY_ALIAS: receiver
+        run: |
+          export AOM_ANDROID_KEYSTORE="$RUNNER_TEMP/androidonmac-release.p12"
+          trap 'rm -f "$AOM_ANDROID_KEYSTORE"' EXIT
+          python3 - <<'PY'
+          import base64, os
+          data = os.environ.get('AOM_ANDROID_KEYSTORE_B64', '')
+          if not data:
+              raise SystemExit('Persistent Android signing key is required.')
+          with open(os.environ['AOM_ANDROID_KEYSTORE'], 'wb') as f:
+              f.write(base64.b64decode(data, validate=True))
+          os.chmod(os.environ['AOM_ANDROID_KEYSTORE'], 0o600)
+          PY
+          bash scripts/build-android.sh
+      - uses: actions/upload-artifact@v7
+        if: github.event_name != 'pull_request'
+        with:
+          name: AndroidOnMac-receiver
+          if-no-files-found: error
+          path: dist/AndroidOnMac-Receiver-0.2.0-preview.1.apk
+
   build:
+    needs: android
     runs-on: macos-15
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        if: github.event_name != 'pull_request'
+        with:
+          name: AndroidOnMac-receiver
+          path: dist
       - name: Check build host
         run: |
           test "$(uname -m)" = arm64
@@ -31,11 +78,14 @@ jobs:
           PYTHONPYCACHEPREFIX="$PWD/.cache/pycache" python3 -m py_compile scripts/fetch-dependencies.py
           bash scripts/fetch-engine.sh
           bash scripts/test.sh
+          swift build -c release
           git diff --check
       - name: Build preview application
+        if: github.event_name != 'pull_request'
         env:
           RELEASE_TAG: ${{ github.ref_name }}
           APP_BUILD: ${{ github.run_number }}
+          AOM_ANDROID_PREBUILT: '1'
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             APP_VERSION="${RELEASE_TAG#v}"
@@ -44,6 +94,7 @@ jobs:
           bash scripts/build-app.sh
           bash scripts/package-release.sh
       - name: Upload app and mandatory source companion
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v7
         with:
           name: AndroidOnMac-preview-arm64
@@ -51,6 +102,7 @@ jobs:
           path: |
             dist/*.dmg
             dist/*.zip
+            dist/*.apk
             dist/*-third-party-sources.tar.gz
             dist/*-SHA256SUMS.txt
 

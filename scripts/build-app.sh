@@ -8,23 +8,37 @@ if [[ ! "$TASK_SWIFT_MAJOR" =~ ^[0-9]+$ ]] || (( TASK_SWIFT_MAJOR < 6 )); then
   echo 'Swift 6 or newer is required. Install a current Command Line Tools or Xcode toolchain.' >&2
   exit 1
 fi
-APP_VERSION="${APP_VERSION:-0.1.0}"
+APP_VERSION="${APP_VERSION:-0.2.0}"
 APP_BUILD="${APP_BUILD:-1}"
 APP_DIR="$TASK_ROOT/dist/AndroidOnMac.app"
 TASK_SDK="$(xcrun --sdk macosx --show-sdk-path)"
 python3 scripts/fetch-dependencies.py --engine --compliance
+RECEIVER_APK="$TASK_ROOT/dist/AndroidOnMac-Receiver-0.2.0-preview.1.apk"
+# Local packages always rebuild from this checkout. CI may supply the signed
+# artifact produced by its Android job; verify that artifact before bundling.
+if [[ "${AOM_ANDROID_PREBUILT:-0}" == 1 ]]; then
+  bash scripts/verify-android.sh "$RECEIVER_APK"
+else
+  bash scripts/build-android.sh
+fi
 # Swift 6+ supports SwiftPM with current standalone Command Line Tools. The
 # absence of Xcode's PlatformPath must not route this build to a manual fallback.
 swift build -c release --arch arm64 --product AndroidOnMac
+swift build -c release --arch arm64 --product VirtualDisplayHelper
 EXECUTABLE_DIR="$(swift build -c release --arch arm64 --show-bin-path)"
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources/engine"
 cp "$EXECUTABLE_DIR/AndroidOnMac" "$APP_DIR/Contents/MacOS/AndroidOnMac"
+cp "$EXECUTABLE_DIR/VirtualDisplayHelper" "$APP_DIR/Contents/MacOS/VirtualDisplayHelper"
+cp "$RECEIVER_APK" "$APP_DIR/Contents/Resources/AndroidOnMac-Receiver.apk"
 xcrun --sdk macosx clang -std=c11 -Wall -Wextra -O2 -arch arm64 \
   -isysroot "$TASK_SDK" -mmacosx-version-min=13.0 \
   Sources/ProcessLauncher/main.c -o "$APP_DIR/Contents/MacOS/ProcessLauncher"
 cp .cache/engine/* "$APP_DIR/Contents/Resources/engine/"
 cp -R .cache/compliance/licenses "$APP_DIR/Contents/Resources/Licenses"
+mkdir -p "$APP_DIR/Contents/Resources/Licenses/deskpad"
+cp Sources/VirtualDisplayHelper/DESKPAD_LICENSE.txt "$APP_DIR/Contents/Resources/Licenses/deskpad/LICENSE.txt"
+if [[ -d android/licenses ]]; then cp -R android/licenses "$APP_DIR/Contents/Resources/Licenses/android"; fi
 cp -R docs "$APP_DIR/Contents/Resources/docs"
 cp THIRD_PARTY_NOTICES.md LICENSE "$APP_DIR/Contents/Resources/"
 swift scripts/generate-icon.swift "$APP_DIR/Contents/Resources/AppIcon.icns"
@@ -41,8 +55,8 @@ data = {
     'CFBundleIconFile': 'AppIcon', 'CFBundleDevelopmentRegion': 'zh_CN',
     'CFBundleLocalizations': ['zh_CN'], 'LSMinimumSystemVersion': '13.0',
     'NSHighResolutionCapable': True, 'NSPrincipalClass': 'NSApplication',
-    'NSLocalNetworkUsageDescription': '通过同一局域网发现、配对和连接您授权的 Android 手机，以显示画面并用键鼠操控。',
-    'NSBonjourServices': ['_adb-tls-pairing._tcp', '_adb-tls-connect._tcp', '_adb._tcp'],
+    'NSLocalNetworkUsageDescription': '通过同一局域网连接您授权的 Android 手机，在手机与 Mac 之间传输画面、声音和操作。',
+    'NSBonjourServices': ['_adb-tls-pairing._tcp', '_adb-tls-connect._tcp', '_adb._tcp', '_aom-display._tcp'],
     'NSHumanReadableCopyright': 'Copyright © 2026 XuCheri. Third-party components retain their licenses.',
     'AndroidOnMacReleaseChannel': 'preview',
 }
@@ -53,6 +67,7 @@ plutil -lint "$APP_DIR/Contents/Info.plist"
 codesign --force --sign - "$APP_DIR/Contents/Resources/engine/adb"
 codesign --force --sign - "$APP_DIR/Contents/Resources/engine/scrcpy"
 codesign --force --sign - "$APP_DIR/Contents/MacOS/ProcessLauncher"
+codesign --force --sign - "$APP_DIR/Contents/MacOS/VirtualDisplayHelper"
 codesign --force --sign - "$APP_DIR/Contents/MacOS/AndroidOnMac"
 codesign --force --sign - "$APP_DIR"
 bash scripts/verify-app.sh "$APP_DIR"
